@@ -71,15 +71,20 @@ def tasks_text(role: str) -> tuple[str, str, str]:
 
 
 #: Xulosa xabarlari tugmalari (V3 §14.2): VET ``/vet``, ADMIN ``/orders``, WAREHOUSE ``/warehouse``.
+#: Konstruktor vazifalari va dalolatnomalar (API_CONTRACT_V4 §3, §6) — har bir rolda oxirgi tugmalar.
+WORK_BUTTONS: list[tuple[str, str]] = [("📝 Vazifalar", "/tasks"), ("📄 Dalolatnomalar", "/acts")]
 _SUMMARY_BUTTONS: dict[str, list[tuple[str, str]]] = {
-    VET: [("🩺 Veterinariya", "/vet"), ("📨 Murojaatlar", "/vet/requests")],
-    ADMIN: [("🛒 Buyurtmalar", "/orders"), ("🚚 Logistika", "/logistics"), ("🩺 Veterinariya", "/vet")],
-    WAREHOUSE: [("📦 Ombor", "/warehouse"), ("🚚 Logistika", "/logistics")],
+    VET: [("🩺 Veterinariya", "/vet"), ("📨 Murojaatlar", "/vet/requests"), *WORK_BUTTONS],
+    ADMIN: [
+        ("🛒 Buyurtmalar", "/orders"), ("🚚 Logistika", "/logistics"), ("🩺 Veterinariya", "/vet"),
+        ("🔄 Jarayonlar", "/processes"), *WORK_BUTTONS,
+    ],
+    WAREHOUSE: [("📦 Ombor", "/warehouse"), ("🚚 Logistika", "/logistics"), *WORK_BUTTONS],
 }
 #: Sarlavha xabari tugmalari (LOGISTICS / OWNER).
 _HEADER_BUTTONS: dict[str, list[tuple[str, str]]] = {
-    LOGISTICS: [("🚚 Logistika", "/logistics")],
-    OWNER: [("🛒 Buyurtmalarim", "/my/orders"), ("🚚 Yetkazib berishlar", "/my/deliveries")],
+    LOGISTICS: [("🚚 Logistika", "/logistics"), *WORK_BUTTONS],
+    OWNER: [("🛒 Buyurtmalarim", "/my/orders"), ("🚚 Yetkazib berishlar", "/my/deliveries"), *WORK_BUTTONS],
 }
 #: ADMIN: yangi buyurtmalarning to‘g‘ridan-to‘g‘ri havolalari (eng ko‘pi shuncha).
 ADMIN_ORDER_LINKS = 4
