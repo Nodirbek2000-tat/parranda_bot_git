@@ -1,0 +1,26 @@
+# NNP BOT — aiogram
+#
+# parranda_backend dan KEYIN ishga tushiriladi (u `nnp_net` tarmog'ini yaratadi).
+#
+#   cp .env.dist .env      # BOT_TOKEN, BOT_API_TOKEN, ADMINS ni to'ldiring
+#   docker compose build
+#   docker compose up -d
+
+name: nnp-bot
+
+services:
+  bot:
+    build: .
+    image: nnp-bot:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Backend'ga ichki tarmoq orqali — `.env` dagi localhost qiymatini bosadi
+      API_URL: http://backend:8000/api
+      # Web App ochiq HTTPS manzili (Telegram faqat https ochadi)
+      WEBAPP_URL: ${WEBAPP_URL:-https://imkon-plus.uz}
+    networks: [nnp_net]
+
+networks:
+  nnp_net:
+    external: true
