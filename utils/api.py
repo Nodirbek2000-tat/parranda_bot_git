@@ -61,8 +61,9 @@ class SummaryHousehold(TypedDict):
 
 class OwnerSummaryToday(TypedDict):
     report_submitted: bool
-    eggs: Optional[int]
     feed_kg: Optional[float]
+    meat_kg: Optional[float]
+    avg_weight_g: Optional[float]
     deaths: int
 
 
@@ -73,10 +74,11 @@ class OwnerSummaryWeek(TypedDict):
     reports: int
     reported: int
     expected: int
-    eggs: int
     feed_kg: float
+    meat_kg: float
+    fcr: Optional[float]
+    avg_weight_g: Optional[float]
     deaths: int
-    laying_rate_pct: Optional[float]
 
 
 class StaffSummaryToday(TypedDict):
@@ -84,9 +86,9 @@ class StaffSummaryToday(TypedDict):
     households_expected: int
     households_reported: int
     report_discipline_pct: Optional[float]
-    eggs: int
     feed_kg: float
-    laying_rate_pct: Optional[float]
+    meat_kg: float
+    fcr: Optional[float]
     deaths: int
     deaths_center: int
     birds_in_households: int

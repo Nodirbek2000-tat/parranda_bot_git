@@ -25,14 +25,14 @@ Matn shablonlari kontraktning 5.2-bo‘limidagi bilan aynan bir xil (testlar so�
 
 | Rol (backend qaytargan `role`) | Matn | Web App tugmasi |
 |---|---|---|
-| `OWNER` | «NNP — XONADON HISOBOTI»: xonadon, parranda soni, bugungi hisobot (✅/❌), bugun tuxum/yem/nobud, oxirgi 7 kun (tuxum, tuxumdorlik, yem, nobud, hisobotlar `6 / 7`) | `WEBAPP_URL/my` |
-| `ADMIN`, `WAREHOUSE` | «NNP — BUGUNGI HOLAT»: hisobot topshirgan xonadonlar `8 / 11 (72.7%)`, tuxum, tuxumdorlik, yem sarfi, nobud, jami parranda (xonadonlarda · markazda), kam qolgan mahsulotlar | `WEBAPP_URL/stats` |
+| `OWNER` | «NNP — XONADON HISOBOTI»: xonadon, parranda soni, bugungi hisobot (✅/❌), bugun go‘sht/yem/o‘rtacha vazn/nobud, oxirgi 7 kun (go‘sht, yem, FCR = yem/go‘sht, o‘rtacha vazn, nobud, hisobotlar `6 / 7`) | `WEBAPP_URL/my` |
+| `ADMIN`, `WAREHOUSE` | «NNP — BUGUNGI HOLAT»: hisobot topshirgan xonadonlar `8 / 11 (72.7%)`, go‘sht, yem sarfi, FCR, nobud, jami parranda (xonadonlarda · markazda), kam qolgan mahsulotlar | `WEBAPP_URL/stats` |
 
 Formatlash (`utils/formatting.py`, backenddagi `common/formatting.py` bilan bir xil qoida):
 sonlar minglik bo‘shliq bilan, kasrning oxirgi nollari tashlanadi (`2 800`, `310.5`, `380`);
 foizlar doim 1 xona kasr, `ROUND_HALF_UP` (`81.2%`, `100.0%`); `null` → `—` (birliksiz);
 sanalar `DD.MM.YYYY` (backend `date` maydoni, u bo‘lmasa Toshkent vaqti, UTC+5).
-Hisobot topshirilmagan kun «Bugun tuxum» va «Bugun yem» — `—`. Xonadon nomi va kodi HTML uchun ekranlanadi.
+Hisobot topshirilmagan kun «Bugun go‘sht» va «Bugun yem» — `—`; FCR `null` (go‘sht 0) — `—`, 2 xona kasr bilan (`1.80`); o‘rtacha vazn qatori faqat vazn kiritilgan bo‘lsa. Xonadon nomi va kodi HTML uchun ekranlanadi.
 «🔎 Web App orqali ko‘rish» tugmasi faqat `WEBAPP_URL` https bo‘lsa qo‘shiladi; aks holda xabar rolga mos menyu bilan keladi.
 
 Xatolar: foydalanuvchi bog‘lanmagan (`404`) → «Siz hali tizimga kirmagansiz… /start»;
@@ -189,10 +189,10 @@ utils/set_bot_commands.py  buyruqlar ro‘yxati va chat menyusi tugmasi
   topshiriq tugmalari ishlamaydi — “⚠️ Sizda vaqtinchalik parol…” va platforma tugmasi (`require_user(...,
   allow_temp_password=)`, `send_password_prompt`). Backend ham bu amallarga `403` qaytaradi.
 - **`/settings`** — shaxsiy bildirishnoma sozlamalari Web App’da (qo‘ng‘iroqcha → ⚙️); buyruqlar ro‘yxati va `/help` da.
-- **Go‘sht**: `/reports` matnlarida go‘sht qatori faqat qiymat > 0 bo‘lsa (`meat_kg`).
+- **Faqat go‘sht** (2026-11-05, mijoz qarori — kompaniya faqat go‘sht parrandasi bilan ishlaydi): `/reports` matnlarida go‘sht (`meat_kg`), FCR (`fcr`) va o‘rtacha vazn (`avg_weight_g`, faqat kiritilgan bo‘lsa).
 - **Telegram 5xx** (`RestartingTelegram` yoki aynan `TelegramAPIError` statusiz) tarmoq uzilishi kabi: urinish
   hisoblanmaydi, xabar `PENDING` qoladi, sikl kutishi 3 → 60 s gacha oshadi (`utils/notifier.py::is_telegram_server_error`).
-- Testlar: 139 ta (`venv\Scripts\python.exe -m unittest discover -s tests -t .`).
+- Testlar: 140 ta (`venv\Scripts\python.exe -m unittest discover -s tests -t .`).
 
 ## Docker (server)
 

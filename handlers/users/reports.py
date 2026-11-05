@@ -15,7 +15,7 @@ from keyboards.default.menu import BTN_REPORTS, main_menu
 from keyboards.inline.webapp import WEBAPP_BUTTON_TEXT, webapp_button_markup
 from loader import api, dp
 from utils.api import Forbidden, NotFound, UserSummary
-from utils.formatting import EMPTY, fmt_date, fmt_number, fmt_percent, fmt_quantity, local_today, parse_date
+from utils.formatting import EMPTY, fmt_date, fmt_fixed, fmt_number, fmt_percent, fmt_quantity, local_today, parse_date
 from utils.roles import LOGISTICS, OWNER, VET
 
 from .common import NOT_LINKED_TEXT, PRIVATE, esc, require_user
@@ -64,9 +64,16 @@ def _death_lines(today: Mapping[str, Any]) -> list[str]:
     ]
 
 
-def _has_meat(value: Any) -> bool:
-    """Go'sht qatori faqat go'sht kiritilgan bo'lsa ko'rsatiladi (broyler; tuxum xonadonlarida shovqin bo'lmasin)."""
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+FCR_LABEL = "FCR (yem/go‘sht)"
+
+
+def _weight_line(label: str, value: Any) -> list[str]:
+    """O'rtacha vazn qatori faqat vazn kiritilgan bo'lsa (backend ``null`` bermasa)."""
+    return [f"{label}: {fmt_quantity(value, 'g')}"] if _is_number(value) else []
 
 
 def owner_report_text(summary: Mapping[str, Any]) -> str:
@@ -83,11 +90,9 @@ def owner_report_text(summary: Mapping[str, Any]) -> str:
         household_line = esc(name or code or EMPTY)
 
     def today_value(key: str, unit: str) -> str:
-        # Hisobot topshirilmagan bo'lsa tuxum/yem qiymati yo'q (kontrakt: null).
+        # Hisobot topshirilmagan bo'lsa go'sht/yem qiymati yo'q (kontrakt: null).
         return fmt_quantity(today.get(key), unit) if submitted else EMPTY
 
-    meat_today = [f"Bugun go‘sht: {fmt_quantity(today.get('meat_kg'), 'kg')}"] if _has_meat(today.get("meat_kg")) else []
-    meat_week = [f"Go‘sht: {fmt_quantity(week.get('meat_kg'), 'kg')}"] if _has_meat(week.get("meat_kg")) else []
     return "\n".join([
         "📊 <b>NNP — XONADON HISOBOTI</b>",
         "",
@@ -96,16 +101,17 @@ def owner_report_text(summary: Mapping[str, Any]) -> str:
         "",
         f"Parranda soni: {fmt_quantity(summary.get('bird_count'), 'dona')}",
         "Bugungi hisobot: " + ("✅ topshirilgan" if submitted else "❌ topshirilmagan"),
-        f"Bugun tuxum: {today_value('eggs', 'dona')}",
+        f"Bugun go‘sht: {today_value('meat_kg', 'kg')}",
         f"Bugun yem: {today_value('feed_kg', 'kg')}",
-        *meat_today,
+        *(_weight_line("Bugun o‘rtacha vazn", today.get("avg_weight_g")) if submitted else []),
         f"Bugun nobud: {fmt_quantity(today.get('deaths'), 'dona')}",
         "",
         f"<b>Oxirgi 7 kun</b> ({fmt_date(week.get('date_from'))} – {fmt_date(week.get('date_to'))})",
-        f"Tuxum: {fmt_quantity(week.get('eggs'), 'dona')}",
-        f"Tuxumdorlik: {fmt_percent(week.get('laying_rate_pct'))}",
+        f"Go‘sht: {fmt_quantity(week.get('meat_kg'), 'kg')}",
         f"Yem: {fmt_quantity(week.get('feed_kg'), 'kg')}",
-        *meat_week,
+        # FCR = yem / go'sht (backend hisoblaydi; go'sht 0 bo'lsa null -> «—»). Qanchalik past — shuncha yaxshi.
+        f"{FCR_LABEL}: {fmt_fixed(week.get('fcr'), 2)}",
+        *_weight_line("O‘rtacha vazn", week.get("avg_weight_g")),
         f"Nobud: {fmt_quantity(week.get('deaths'), 'dona')}",
         # Kiritilgan = kutilgan kunlardan hisobot borlari (Web App «Hisobot intizomi» bilan bir xil).
         f"Hisobotlar: {_ratio(_first(week, 'reported', 'reports'), week.get('expected'))}",
@@ -123,10 +129,9 @@ def staff_report_text(summary: Mapping[str, Any]) -> str:
         "Hisobot topshirgan xonadonlar: "
         f"{_ratio(today.get('households_reported'), _first(today, 'households_expected', 'households_active'))} "
         f"({fmt_percent(today.get('report_discipline_pct'))})",
-        f"Tuxum: {fmt_quantity(today.get('eggs'), 'dona')}",
-        f"Tuxumdorlik: {fmt_percent(today.get('laying_rate_pct'))}",
+        f"Go‘sht: {fmt_quantity(today.get('meat_kg'), 'kg')}",
         f"Yem sarfi: {fmt_quantity(today.get('feed_kg'), 'kg')}",
-        *([f"Go‘sht: {fmt_quantity(today.get('meat_kg'), 'kg')}"] if _has_meat(today.get("meat_kg")) else []),
+        f"{FCR_LABEL}: {fmt_fixed(today.get('fcr'), 2)}",
         *_death_lines(today),
         f"Jami parranda: {fmt_quantity(today.get('birds_total'), 'dona')}",
         f"  xonadonlarda: {fmt_number(today.get('birds_in_households'))} · "

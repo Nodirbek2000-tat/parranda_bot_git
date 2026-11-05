@@ -68,6 +68,21 @@ def fmt_percent(value: Any) -> str:
     return f"{sign}{_group(integer_part)}.{tenths}%"
 
 
+def fmt_fixed(value: Any, places: int = 2) -> str:
+    """Belgilangan xona kasr bilan (``ROUND_HALF_UP``): ``1.8`` -> ``1.80`` (FCR); ``None`` -> ``—``."""
+    number = _to_decimal(value)
+    if number is None:
+        return EMPTY
+    number = number.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+    sign = "-" if number < 0 else ""
+    number = abs(number)
+    integer_part = int(number)
+    text = _group(integer_part)
+    if places > 0:
+        text = f"{text}.{format(number, 'f').split('.')[1]}"
+    return f"{sign}{text}"
+
+
 def fmt_quantity(value: Any, unit: str) -> str:
     """Son va o'lchov birligi: ``2 800 dona``; qiymat yo'q bo'lsa birliksiz ``—``."""
     text = fmt_number(value)

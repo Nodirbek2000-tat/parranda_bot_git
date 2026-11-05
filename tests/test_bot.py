@@ -52,9 +52,9 @@ def owner_summary() -> dict[str, Any]:
         "role": "OWNER", "date": "2026-11-04", "generated_at": "2026-11-04T18:20:05+05:00",
         "household": {"id": 3, "code": "XN-0003", "name": "Navbahor 12-uy"},
         "bird_count": 497,
-        "today": {"report_submitted": True, "eggs": 410, "feed_kg": 55.5, "deaths": 3},
+        "today": {"report_submitted": True, "feed_kg": 55.5, "meat_kg": 62.5, "avg_weight_g": 1850.0, "deaths": 3},
         "last_7d": {"date_from": "2026-10-29", "date_to": "2026-11-04", "days": 7, "reports": 6, "reported": 6, "expected": 7,
-                    "eggs": 2800, "feed_kg": 380.0, "deaths": 5, "laying_rate_pct": 81.2},
+                    "feed_kg": 380.0, "meat_kg": 210.5, "fcr": 1.81, "avg_weight_g": 1840.5, "deaths": 5},
     }
 
 
@@ -63,7 +63,7 @@ def staff_summary(role: str = "ADMIN") -> dict[str, Any]:
     return {
         "role": role, "date": "2026-11-04", "generated_at": "2026-11-04T18:20:05+05:00",
         "today": {"households_active": 11, "households_expected": 10, "households_reported": 8,
-                  "report_discipline_pct": 80.0, "eggs": 2100, "feed_kg": 310.5, "laying_rate_pct": 80.4,
+                  "report_discipline_pct": 80.0, "feed_kg": 310.5, "meat_kg": 172.5, "fcr": 1.8,
                   "deaths": 3, "deaths_center": 1,
                   "birds_in_households": 5400, "birds_in_center": 1500, "birds_total": 6900,
                   "low_stock_count": 1},

@@ -275,14 +275,16 @@ Sana: 04.11.2026
 
 Parranda soni: 497 dona
 Bugungi hisobot: ✅ topshirilgan
-Bugun tuxum: 410 dona
+Bugun go‘sht: 62.5 kg
 Bugun yem: 55.5 kg
+Bugun o‘rtacha vazn: 1 850 g
 Bugun nobud: 3 dona
 
 <b>Oxirgi 7 kun</b> (29.10.2026 – 04.11.2026)
-Tuxum: 2 800 dona
-Tuxumdorlik: 81.2%
+Go‘sht: 210.5 kg
 Yem: 380 kg
+FCR (yem/go‘sht): 1.81
+O‘rtacha vazn: 1 840.5 g
 Nobud: 5 dona
 Hisobotlar: 6 / 7"""
 
@@ -291,9 +293,9 @@ STAFF_REPORT_TEXT = """📊 <b>NNP — BUGUNGI HOLAT</b>
 Sana: 04.11.2026
 
 Hisobot topshirgan xonadonlar: 8 / 10 (80.0%)
-Tuxum: 2 100 dona
-Tuxumdorlik: 80.4%
+Go‘sht: 172.5 kg
 Yem sarfi: 310.5 kg
+FCR (yem/go‘sht): 1.80
 Nobud: 4 dona
   xonadonlarda: 3 · markazda: 1
 Jami parranda: 6 900 dona
@@ -344,15 +346,18 @@ class ReportsTests(HandlerTestCase):
 
     async def test_owner_not_submitted_and_null_rate_show_dash(self) -> None:
         summary = self.backend.summaries[OWNER_TG]
-        summary["today"] = {"report_submitted": False, "eggs": None, "feed_kg": None, "deaths": 0}
-        summary["last_7d"].update(reports=0, reported=0, eggs=0, feed_kg=0, deaths=0, laying_rate_pct=None)
+        summary["today"] = {"report_submitted": False, "feed_kg": None, "meat_kg": None, "avg_weight_g": None,
+                            "deaths": 0}
+        summary["last_7d"].update(reports=0, reported=0, feed_kg=0, meat_kg=0, fcr=None, avg_weight_g=None, deaths=0)
         await self.feed(message_update(OWNER_TG, "/reports"))
         text = self.texts()
         self.assertIn("Bugungi hisobot: ❌ topshirilmagan", text)
-        self.assertIn("Bugun tuxum: —\n", text)
+        self.assertIn("Bugun go‘sht: —\n", text)
         self.assertIn("Bugun yem: —\n", text)
         self.assertIn("Bugun nobud: 0 dona", text)
-        self.assertIn("Tuxumdorlik: —\n", text)
+        self.assertIn("Go‘sht: 0 kg\n", text)
+        self.assertIn("FCR (yem/go‘sht): —\n", text)
+        self.assertNotIn("vazn", text)
         self.assertIn("Yem: 0 kg", text)
         self.assertIn("Hisobotlar: 0 / 7", text)
         self.assertNotIn("None", text)
@@ -360,14 +365,14 @@ class ReportsTests(HandlerTestCase):
     async def test_staff_null_ratios_and_large_numbers(self) -> None:
         self.backend.summaries[ADMIN_TG]["today"].update(
             households_active=0, households_expected=0, households_reported=0, report_discipline_pct=None,
-            laying_rate_pct=None, eggs=1234567, feed_kg=12500.25, birds_total=1500,
+            fcr=None, meat_kg=1234567.5, feed_kg=12500.25, birds_total=1500,
             birds_in_households=0, low_stock_count=0,
         )
         await self.feed(message_update(ADMIN_TG, "/reports"))
         text = self.texts()
         self.assertIn("Hisobot topshirgan xonadonlar: 0 / 0 (—)", text)
-        self.assertIn("Tuxum: 1 234 567 dona", text)
-        self.assertIn("Tuxumdorlik: —\n", text)
+        self.assertIn("Go‘sht: 1 234 567.5 kg", text)
+        self.assertIn("FCR (yem/go‘sht): —\n", text)
         self.assertIn("Yem sarfi: 12 500.25 kg", text)
         self.assertIn("  xonadonlarda: 0 · markazda: 1 500", text)
         self.assertIn("Kam qolgan mahsulotlar: 0 ta", text)
@@ -389,27 +394,43 @@ class ReportsTests(HandlerTestCase):
         self.assertNotIn("markazda: 1\n", text)
 
     async def test_percent_always_has_one_decimal(self) -> None:
-        self.backend.summaries[ADMIN_TG]["today"].update(report_discipline_pct=100, laying_rate_pct=80.0)
+        self.backend.summaries[ADMIN_TG]["today"].update(report_discipline_pct=100, fcr=2.005)
         await self.feed(message_update(ADMIN_TG, "/reports"))
         text = self.texts()
         self.assertIn("8 / 10 (100.0%)", text)
-        self.assertIn("Tuxumdorlik: 80.0%", text)
+        self.assertIn("FCR (yem/go‘sht): 2.01", text)  # FCR doim 2 xona kasr (half-up)
 
-    async def test_meat_lines_only_when_reported(self) -> None:
+    async def test_meat_fcr_and_weight_lines(self) -> None:
+        """Go'sht va FCR doim ko'rsatiladi (null -> «—»); o'rtacha vazn qatori faqat vazn kiritilgan bo'lsa."""
         from handlers.users.reports import owner_report_text, staff_report_text
 
         owner = {"household": {"name": "Uy", "code": "XN-0001"}, "date": "2026-11-05", "bird_count": 10,
-                 "today": {"report_submitted": True, "eggs": 0, "feed_kg": 5, "meat_kg": 62.5, "deaths": 0},
-                 "last_7d": {"date_from": "2026-10-30", "date_to": "2026-11-05", "eggs": 0, "feed_kg": 30,
-                             "meat_kg": 120, "deaths": 0, "reported": 7, "expected": 7}}
+                 "today": {"report_submitted": True, "feed_kg": 5, "meat_kg": 62.5, "avg_weight_g": 2100.5,
+                           "deaths": 0},
+                 # FCR = 30 / 12 = 2.5 (backend hisoblaydi, bot faqat formatlaydi: 2 xona kasr).
+                 "last_7d": {"date_from": "2026-10-30", "date_to": "2026-11-05", "feed_kg": 30, "meat_kg": 12,
+                             "fcr": 2.5, "avg_weight_g": 2050, "deaths": 0, "reported": 7, "expected": 7}}
         text = owner_report_text(owner)
-        self.assertIn("Bugun go‘sht: 62,5 kg", text.replace("62.5", "62,5"))
-        self.assertIn("Go‘sht: 120 kg", text)
-        owner["today"]["meat_kg"] = None
-        owner["last_7d"]["meat_kg"] = 0
-        self.assertNotIn("go‘sht", owner_report_text(owner).lower())
-        self.assertIn("Go‘sht: 7 kg", staff_report_text({"date": "2026-11-05", "today": {"meat_kg": 7}}))
-        self.assertNotIn("Go‘sht", staff_report_text({"date": "2026-11-05", "today": {"meat_kg": 0.0}}))
+        self.assertIn("Bugun go‘sht: 62.5 kg\n", text)
+        self.assertIn("Bugun o‘rtacha vazn: 2 100.5 g\n", text)
+        self.assertIn("\nGo‘sht: 12 kg\n", text)
+        self.assertIn("FCR (yem/go‘sht): 2.50\n", text)
+        self.assertIn("\nO‘rtacha vazn: 2 050 g\n", text)
+        # Go'sht kiritilmagan: go'sht «—» (bugun) / 0 (hafta), FCR null -> «—», vazn qatorlari yo'q.
+        owner["today"].update(meat_kg=None, avg_weight_g=None)
+        owner["last_7d"].update(meat_kg=0, fcr=None, avg_weight_g=None)
+        text = owner_report_text(owner)
+        self.assertIn("Bugun go‘sht: —\n", text)
+        self.assertIn("\nGo‘sht: 0 kg\n", text)
+        self.assertIn("FCR (yem/go‘sht): —\n", text)
+        self.assertNotIn("vazn", text)
+        self.assertNotIn("None", text)
+        staff = staff_report_text({"date": "2026-11-05", "today": {"meat_kg": 7, "feed_kg": 14, "fcr": 2}})
+        self.assertIn("Go‘sht: 7 kg\n", staff)
+        self.assertIn("FCR (yem/go‘sht): 2.00\n", staff)
+        staff = staff_report_text({"date": "2026-11-05", "today": {"meat_kg": 0.0, "feed_kg": 14, "fcr": None}})
+        self.assertIn("Go‘sht: 0 kg\n", staff)
+        self.assertIn("FCR (yem/go‘sht): —\n", staff)
 
     async def test_owner_report_escapes_household_values(self) -> None:
         self.backend.summaries[OWNER_TG]["household"] = {"id": 3, "code": "XN-0003", "name": "<b>Uy</b> & bog‘"}

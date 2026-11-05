@@ -17,6 +17,7 @@ from utils.formatting import (  # noqa: E402
     EMPTY,
     TASHKENT_TZ,
     fmt_date,
+    fmt_fixed,
     fmt_number,
     fmt_percent,
     fmt_quantity,
@@ -50,6 +51,17 @@ class FormattingTests(unittest.TestCase):
         for value, expected in cases.items():
             with self.subTest(value=value):
                 self.assertEqual(fmt_percent(value), expected)
+
+    def test_fixed_decimals_half_up(self) -> None:
+        """FCR: doim 2 xona kasr (``ROUND_HALF_UP``), ``None`` -> ``—``."""
+        cases = {1.8: "1.80", 2: "2.00", 2.005: "2.01", Decimal("1.814"): "1.81", 1234.5: "1 234.50",
+                 Decimal("-0.001"): "0.00", "0.125": "0.13"}
+        for value, expected in cases.items():
+            with self.subTest(value=value):
+                self.assertEqual(fmt_fixed(value, 2), expected)
+        self.assertEqual(fmt_fixed(None, 2), EMPTY)
+        self.assertEqual(fmt_fixed(True, 2), EMPTY)
+        self.assertEqual(fmt_fixed(7.6, 0), "8")
 
     def test_quantity_drops_unit_for_missing_value(self) -> None:
         self.assertEqual(fmt_quantity(2800, "dona"), "2 800 dona")
