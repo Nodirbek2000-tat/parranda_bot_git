@@ -98,11 +98,41 @@ def case_id(task: dict) -> Optional[int]:
     return int(value) if value is not None else None
 
 
-def task(task: dict) -> str:
-    """One case from GET /api/bot/tasks/{tid} as a short message.
+KIND_ICONS = {"request": "📨", "visit": "🩺"}
 
-    Accepts flat fields (stage_number, stage_title, stage_status, due_at) or a nested ``stage`` object.
+
+def task_path(task: dict) -> Optional[str]:
+    """Web App path of an item: its own ``path`` (requests, visits) or ``/cases/{id}``."""
+    path = _pick(task, "path")
+    if isinstance(path, str) and path.startswith("/"):
+        return path
+    cid = case_id(task)
+    return f"/cases/{cid}" if cid is not None else None
+
+
+def task(task: dict) -> str:
+    """One item from GET /api/bot/tasks/{tid} as a short message.
+
+    Cases accept flat fields (stage_number, stage_title, stage_status, due_at) or a nested ``stage`` object.
+    Requests and visits (``kind`` = "request" / "visit") carry ``title`` and optionally code/name/due_at.
     """
+    kind = _pick(task, "kind") or "case"
+    if kind != "case":
+        icon = KIND_ICONS.get(kind, "📌")
+        code = _pick(task, "code") or ""
+        name = _pick(task, "name", "household_name") or ""
+        head = f"{icon} <b>{esc(_pick(task, 'title') or 'Vazifa')}</b>"
+        lines = [head]
+        if code or name:
+            lines.append(esc(" — ".join(x for x in (code, name) if x)))
+        status = _pick(task, "status_display", "status")
+        if status:
+            lines.append(f"Holat: {esc(status)}")
+        due = _pick(task, "due_at", "planned_date")
+        if due:
+            overdue = bool(_pick(task, "is_overdue", "overdue"))
+            lines.append(f"Muddat: {fmt_datetime(due)}" + (" 🔴 <b>muddati o‘tgan</b>" if overdue else ""))
+        return "\n".join(lines)
     stage = task.get("stage") if isinstance(task.get("stage"), dict) else {}
     code = _pick(task, "code") or f"#{case_id(task)}"
     name = _pick(task, "name", "household_name", "household") or ""

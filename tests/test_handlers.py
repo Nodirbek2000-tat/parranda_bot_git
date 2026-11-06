@@ -143,6 +143,23 @@ class MenuTests(HandlerTestCase):
         self.assertNotIn("muddati o‘tgan", second)
         self.assertEqual(markup_urls(calls[2].kwargs["reply_markup"]), [f"{WEBAPP}/cases/6"])
 
+    async def test_requests_and_visits_open_their_own_page(self) -> None:
+        self.api.tasks.return_value = [
+            {"kind": "request", "id": 3, "title": "Yem so‘rovi", "code": "XN-0001", "name": "Navbahor",
+             "status_display": "Logist tasdig‘i kutilmoqda", "path": "/requests/3"},
+            {"kind": "visit", "id": 9, "title": "Veterinar ko‘rigi (haftalik)", "code": "XN-0001",
+             "due_at": "2026-11-13", "is_overdue": False, "path": "/visits/9"},
+        ]
+        message = make_message(kb.BTN_TASKS)
+        await handlers.menu_tasks(message)
+        calls = message.answer.await_args_list
+        self.assertIn("📨 <b>Yem so‘rovi</b>", calls[1].args[0])
+        self.assertIn("Holat: Logist tasdig‘i kutilmoqda", calls[1].args[0])
+        self.assertEqual(markup_urls(calls[1].kwargs["reply_markup"]), [f"{WEBAPP}/requests/3"])
+        self.assertIn("🩺 <b>Veterinar ko‘rigi (haftalik)</b>", calls[2].args[0])
+        self.assertIn("Muddat: 13.11.2026", calls[2].args[0])
+        self.assertEqual(markup_urls(calls[2].kwargs["reply_markup"]), [f"{WEBAPP}/visits/9"])
+
     async def test_tasks_are_capped(self) -> None:
         self.api.tasks.return_value = [{"id": i, "code": f"XN-{i:04d}"} for i in range(1, texts.TASKS_LIMIT + 4)]
         message = make_message(kb.BTN_TASKS)

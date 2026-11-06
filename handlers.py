@@ -191,8 +191,8 @@ async def menu_tasks(message: types.Message) -> None:
         header += "\n" + texts.WEBAPP_OFF
     await message.answer(header)
     for item in tasks[: texts.TASKS_LIMIT]:
-        cid = texts.case_id(item)
-        markup = kb.webapp_button(kb.OPEN_CASE_TEXT, f"/cases/{cid}") if cid is not None else None
+        path = texts.task_path(item)
+        markup = kb.webapp_button(kb.OPEN_CASE_TEXT, path) if path else None
         await message.answer(texts.task(item), reply_markup=markup)
     rest = len(tasks) - texts.TASKS_LIMIT
     if rest > 0:
