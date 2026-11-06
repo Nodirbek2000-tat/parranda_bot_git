@@ -1,552 +1,274 @@
-"""Handlerlarning dispatcher orqali tekshiruvi: Telegram so'rovlari ushlab olinadi, backend — soxta server.
+import support  # noqa: F401  (must be first)
 
-Ishga tushirish (parranda_bot papkasidan):
-    venv\\Scripts\\python.exe -m unittest discover -s tests -t . -v
-"""
-from __future__ import annotations
-
-import asyncio
-import contextvars
-import itertools
-import json
-import logging
-import os
-import sys
 import unittest
-from pathlib import Path
-from datetime import date
-from typing import Any
 from unittest import mock
 
-from aiohttp.test_utils import TestServer
+from aiogram import Bot, types
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.dispatcher import FSMContext
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-# Haqiqiy .env talab qilinmasin: soxta qiymatlar (polling ishga tushirilmaydi).
-os.environ.setdefault("BOT_TOKEN", "123456:TESTTOKEN")
-os.environ["BOT_API_TOKEN"] = "test-bot-api-token"
-os.environ["WEBAPP_URL"] = "https://app.example.test"
-
-from aiogram import Bot, Dispatcher, types  # noqa: E402
-
-import app  # noqa: E402,F401 — barcha handlerlarni ro'yxatdan o'tkazadi
-from data import config  # noqa: E402
-from loader import api, bot, dp  # noqa: E402
-from tests.test_bot import ADMIN_TG, OWNER_TG, WAREHOUSE_TG, FakeBackend  # noqa: E402
-
-NEW_TG = 555
-_ids = itertools.count(1)
+import config
+import handlers
+import keyboards as kb
+import loader
+import texts
+from api import ApiError, NotFound, Unavailable
+from support import TG_ID, WEBAPP, make_message, markup_urls, user
 
 
-def message_update(user_id: int, text: str | None = None, **extra: Any) -> types.Update:
-    message: dict[str, Any] = {
-        "message_id": next(_ids),
-        "date": 1762230000,
-        "chat": {"id": user_id, "type": "private"},
-        "from": {"id": user_id, "is_bot": False, "first_name": "Test"},
-        **extra,
-    }
-    if text is not None:
-        message["text"] = text
-        if text.startswith("/"):
-            message["entities"] = [{"type": "bot_command", "offset": 0, "length": len(text.split()[0])}]
-    return types.Update(update_id=next(_ids), message=message)
+def fake_api(**overrides) -> mock.MagicMock:
+    api = mock.MagicMock()
+    api.me = mock.AsyncMock(return_value=user())
+    api.link = mock.AsyncMock(return_value=user())
+    api.unlink = mock.AsyncMock(return_value={})
+    api.tasks = mock.AsyncMock(return_value=[])
+    for name, value in overrides.items():
+        setattr(api, name, value)
+    return api
 
 
 class HandlerTestCase(unittest.IsolatedAsyncioTestCase):
-    """Umumiy muhit: soxta backend + ushlab olingan Telegram so'rovlari (testlarsiz baza sinf)."""
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        logging.disable(logging.CRITICAL)
-        # Testda throttling o'chiriladi (har bir test bir xil handlerlarni tez chaqiradi).
-        dp.middleware.applications.clear()
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        logging.disable(logging.NOTSET)
-
-    async def asyncSetUp(self) -> None:
-        self.assertTrue(config.WEBAPP_ENABLED)
-        self.backend = FakeBackend()
-        self.server = TestServer(self.backend.app)
-        await self.server.start_server()
-        api._base_url = str(self.server.make_url("/api"))
-        dp.storage.data.clear()
-
-        self.calls: list[tuple[str, dict[str, Any]]] = []
-
-        async def fake_request(method: str, data: dict[str, Any] | None = None, files: Any = None, **_: Any) -> Any:
-            self.calls.append((method, dict(data or {})))
-            if method in ("deleteMessage", "answerCallbackQuery"):
-                return True
-            return {
-                "message_id": next(_ids), "date": 1762230000,
-                "chat": {"id": (data or {}).get("chat_id", 0), "type": "private"},
-                "text": (data or {}).get("text", ""),
-            }
-
-        self._patch = mock.patch.object(bot, "request", side_effect=fake_request)
-        self._patch.start()
-
-    async def asyncTearDown(self) -> None:
-        self._patch.stop()
-        await api.close()
-        await self.server.close()
-
-    async def feed(self, update: types.Update) -> None:
-        self.calls.clear()
-        # Polling har bir update ni alohida vazifada (yangi kontekstda) ishlaydi — shuni takrorlaymiz,
-        # aks holda aiogram StateFilter ning kontekstdagi keshi oldingi update holatini qaytaradi.
-        async def run() -> None:
-            Bot.set_current(bot)
-            Dispatcher.set_current(dp)
-            await dp.process_update(update)
-
-        await asyncio.get_running_loop().create_task(run(), context=contextvars.Context())
-
-    def sent(self) -> list[dict[str, Any]]:
-        return [data for method, data in self.calls if method == "sendMessage"]
-
-    def texts(self) -> str:
-        return "\n".join(str(d.get("text", "")) for d in self.sent())
-
-
-
-class HandlerTests(HandlerTestCase):
-
-    async def test_start_linked_owner_shows_menu_and_platform_button(self) -> None:
-        await self.feed(message_update(OWNER_TG, "/start"))
-        sent = self.sent()
-        self.assertEqual(len(sent), 2)
-        self.assertIn("Bobur Aliyev", sent[0]["text"])
-        self.assertIn("Xonadon egasi", sent[0]["text"])
-        keyboard = str(sent[0]["reply_markup"])
-        self.assertIn("request_location", keyboard)
-        self.assertIn("👤 Profil", keyboard)
-        self.assertIn("web_app", str(sent[1]["reply_markup"]))
-        self.assertIn("https://app.example.test", str(sent[1]["reply_markup"]))
-
-    async def test_admin_menu_has_no_location_button(self) -> None:
-        await self.feed(message_update(ADMIN_TG, "/menu"))
-        self.assertNotIn("request_location", str(self.sent()[0]["reply_markup"]))
-
-    async def test_login_flow_deletes_password_and_links(self) -> None:
-        await self.feed(message_update(NEW_TG, "/start"))
-        self.assertIn("login", self.texts())
-
-        await self.feed(message_update(NEW_TG, "aliyev"))
-        self.assertIn("parol", self.texts())
-
-        await self.feed(message_update(NEW_TG, "wrong"))
-        self.assertIn("deleteMessage", [m for m, _ in self.calls])
-        self.assertIn("Login yoki parol noto‘g‘ri", self.texts())
-
-        await self.feed(message_update(NEW_TG, "aliyev"))
-        await self.feed(message_update(NEW_TG, "correct-pass"))
-        self.assertIn("deleteMessage", [m for m, _ in self.calls])
-        self.assertIn("muvaffaqiyatli", self.texts())
-        self.assertIn(NEW_TG, self.backend.users)
-        self.assertNotIn("correct-pass", self.texts())
-
-    async def test_cancel_aborts_login(self) -> None:
-        await self.feed(message_update(NEW_TG, "/start"))
-        await self.feed(message_update(NEW_TG, "/cancel"))
-        self.assertIn("bekor qilindi", self.texts())
-        await self.feed(message_update(NEW_TG, "salom"))
-        self.assertIn("/start", self.texts())  # fallback: tizimga kirmagan
-
-    async def test_profile_escapes_html(self) -> None:
-        self.backend.users[OWNER_TG]["full_name"] = "<b>Ali</b> & Co"
-        await self.feed(message_update(OWNER_TG, "👤 Profil"))
-        text = self.texts()
-        self.assertIn("&lt;b&gt;Ali&lt;/b&gt; &amp; Co", text)
-        self.assertIn("XN-0003", text)
-
-    async def test_location_owner_and_admin(self) -> None:
-        location = {"location": {"latitude": 39.6541234, "longitude": 66.9591234}}
-        await self.feed(message_update(OWNER_TG, **location))
-        self.assertIn("39.654123, 66.959123", self.texts())
-
-        await self.feed(message_update(ADMIN_TG, **location))
-        self.assertIn("faqat xonadon egasi", self.texts())
-
-    async def test_fallback_does_not_echo(self) -> None:
-        await self.feed(message_update(OWNER_TG, "qandaydir matn"))
-        self.assertNotIn("qandaydir matn", self.texts())
-        self.assertIn("menyu", self.texts())
-
-    async def test_logout_confirmation(self) -> None:
-        await self.feed(message_update(OWNER_TG, "/logout"))
-        self.assertIn("logout:yes", str(self.sent()[0]["reply_markup"]))
-
-        callback = types.Update(update_id=next(_ids), callback_query={
-            "id": "cb1", "chat_instance": "x", "data": "logout:yes",
-            "from": {"id": OWNER_TG, "is_bot": False, "first_name": "Test"},
-            "message": {"message_id": 10, "date": 1762230000, "text": "?",
-                        "chat": {"id": OWNER_TG, "type": "private"}},
-        })
-        await self.feed(callback)
-        self.assertNotIn(OWNER_TG, self.backend.users)
-        self.assertIn("editMessageText", [m for m, _ in self.calls])
-
-    async def test_password_starting_with_slash_is_deleted_and_used(self) -> None:
-        await self.feed(message_update(NEW_TG, "/start"))
-        await self.feed(message_update(NEW_TG, "aliyev"))
-        with mock.patch.object(api, "link", wraps=api.link) as link:
-            await self.feed(message_update(NEW_TG, "/Secr3t-pass"))
-        self.assertIn("deleteMessage", [m for m, _ in self.calls])
-        link.assert_awaited_once_with(NEW_TG, "aliyev", "/Secr3t-pass")
-        self.assertNotIn("Secr3t", self.texts())
-
-    async def test_navigation_command_during_password_is_deleted_not_sent(self) -> None:
-        await self.feed(message_update(NEW_TG, "/start"))
-        await self.feed(message_update(NEW_TG, "aliyev"))
-        with mock.patch.object(api, "link", wraps=api.link) as link:
-            await self.feed(message_update(NEW_TG, "/menu"))
-        link.assert_not_awaited()
-        self.assertIn("deleteMessage", [m for m, _ in self.calls])
-        self.assertIn("davom etmoqda", self.texts())
-
-    async def test_password_handler_is_never_throttled(self) -> None:
-        from handlers.users.login import login_password
-
-        self.assertEqual(getattr(login_password, "throttling_rate_limit", None), 0)
-
-    async def test_unexpected_error_replies_and_never_logs_password(self) -> None:
-        await self.feed(message_update(NEW_TG, "/start"))
-        await self.feed(message_update(NEW_TG, "aliyev"))
-        logging.disable(logging.NOTSET)
-        try:
-            with mock.patch.object(api, "link", side_effect=RuntimeError("boom")), \
-                    self.assertLogs(level="DEBUG") as logs:
-                await self.feed(message_update(NEW_TG, "TopSecret123"))
-        finally:
-            logging.disable(logging.CRITICAL)
-        self.assertNotIn("TopSecret123", "\n".join(logs.output))
-        self.assertIn("Serverda xatolik", self.texts())
-
-    async def test_api_error_is_answered_once(self) -> None:
-        await self.server.close()
-        await self.feed(message_update(OWNER_TG, "/menu"))
-        self.assertEqual(len(self.sent()), 1)
-
-    async def test_blocked_owner_location_shows_backend_reason(self) -> None:
-        self.backend.users[OWNER_TG]["is_active"] = False
-        await self.feed(message_update(OWNER_TG, location={"latitude": 39.65, "longitude": 66.95}))
-        self.assertIn("bloklangan", self.texts())
-        self.assertNotIn("faqat xonadon egasi", self.texts())
-
-    async def test_logout_from_uneditable_message_still_completes(self) -> None:
-        from aiogram.utils.exceptions import MessageCantBeEdited
-
-        original = bot.request.side_effect
-
-        async def request(method: str, data: dict[str, Any] | None = None, *a: Any, **kw: Any) -> Any:
-            if method == "editMessageText":
-                self.calls.append((method, dict(data or {})))
-                raise MessageCantBeEdited("Bad Request: message can't be edited")
-            return await original(method, data, *a, **kw)
-
-        bot.request.side_effect = request
-        callback = types.Update(update_id=next(_ids), callback_query={
-            "id": "cb2", "chat_instance": "x", "data": "logout:yes",
-            "from": {"id": OWNER_TG, "is_bot": False, "first_name": "Test"},
-            "message": {"message_id": 11, "date": 1762230000, "text": "?",
-                        "chat": {"id": OWNER_TG, "type": "private"}},
-        })
-        await self.feed(callback)
-        methods = [m for m, _ in self.calls]
-        self.assertNotIn(OWNER_TG, self.backend.users)
-        self.assertIn("answerCallbackQuery", methods)
-        self.assertIn("/start", self.texts())
-
-    async def test_backend_unavailable_message(self) -> None:
-        await self.server.close()
-        await self.feed(message_update(OWNER_TG, "/menu"))
-        self.assertIn("Server bilan aloqa yo‘q, birozdan keyin urinib ko‘ring.", self.texts())
-
-
-# docs/API_CONTRACT_V2.md 5.2 dagi namunaviy matnlar (5.1 namunaviy javoblari uchun) — aynan shunday bo'lishi kerak.
-OWNER_REPORT_TEXT = """📊 <b>NNP — XONADON HISOBOTI</b>
-
-Xonadon: Navbahor 12-uy (XN-0003)
-Sana: 04.11.2026
-
-Parranda soni: 497 dona
-Bugungi hisobot: ✅ topshirilgan
-Bugun go‘sht: 62.5 kg
-Bugun yem: 55.5 kg
-Bugun o‘rtacha vazn: 1 850 g
-Bugun nobud: 3 dona
-
-<b>Oxirgi 7 kun</b> (29.10.2026 – 04.11.2026)
-Go‘sht: 210.5 kg
-Yem: 380 kg
-FCR (yem/go‘sht): 1.81
-O‘rtacha vazn: 1 840.5 g
-Nobud: 5 dona
-Hisobotlar: 6 / 7"""
-
-STAFF_REPORT_TEXT = """📊 <b>NNP — BUGUNGI HOLAT</b>
-
-Sana: 04.11.2026
-
-Hisobot topshirgan xonadonlar: 8 / 10 (80.0%)
-Go‘sht: 172.5 kg
-Yem sarfi: 310.5 kg
-FCR (yem/go‘sht): 1.80
-Nobud: 4 dona
-  xonadonlarda: 3 · markazda: 1
-Jami parranda: 6 900 dona
-  xonadonlarda: 5 400 · markazda: 1 500
-Kam qolgan mahsulotlar: 1 ta"""
-
-
-class ReportsTests(HandlerTestCase):
-    """``/reports`` va «📊 Hisobot» (docs/API_CONTRACT_V2.md 5.2)."""
-
-    def summary_requests(self) -> list[str]:
-        return [p for p in self.backend.paths if p.endswith("/summary")]
-
-    @staticmethod
-    def webapp_url(sent: dict[str, Any]) -> str | None:
-        markup = sent.get("reply_markup")
-        data = json.loads(markup) if isinstance(markup, str) else markup
-        if not isinstance(data, dict) or "inline_keyboard" not in data:
-            return None
-        return data["inline_keyboard"][0][0]["web_app"]["url"]
-
-    async def test_owner_report_matches_contract_and_opens_my(self) -> None:
-        await self.feed(message_update(OWNER_TG, "/reports"))
-        sent = self.sent()
-        self.assertEqual(len(sent), 1)
-        self.assertEqual(sent[0]["text"], OWNER_REPORT_TEXT)
-        self.assertEqual(self.webapp_url(sent[0]), "https://app.example.test/my")
-        self.assertIn("🔎 Web App orqali ko‘rish", str(sent[0]["reply_markup"]))
-        self.assertEqual(self.summary_requests(), [f"/api/bot/users/{OWNER_TG}/summary"])
-
-    async def test_admin_report_matches_contract_and_opens_stats(self) -> None:
-        await self.feed(message_update(ADMIN_TG, "/reports"))
-        sent = self.sent()
-        self.assertEqual(len(sent), 1)
-        self.assertEqual(sent[0]["text"], STAFF_REPORT_TEXT)
-        self.assertEqual(self.webapp_url(sent[0]), "https://app.example.test/stats")
-
-    async def test_warehouse_uses_staff_report_via_button(self) -> None:
-        await self.feed(message_update(WAREHOUSE_TG, "📊 Hisobot"))
-        sent = self.sent()
-        self.assertEqual(len(sent), 1)
-        self.assertEqual(sent[0]["text"], STAFF_REPORT_TEXT)
-        self.assertEqual(self.webapp_url(sent[0]), "https://app.example.test/stats")
-
-    async def test_owner_button_gives_same_report(self) -> None:
-        await self.feed(message_update(OWNER_TG, "📊 Hisobot"))
-        self.assertEqual(self.texts(), OWNER_REPORT_TEXT)
-
-    async def test_owner_not_submitted_and_null_rate_show_dash(self) -> None:
-        summary = self.backend.summaries[OWNER_TG]
-        summary["today"] = {"report_submitted": False, "feed_kg": None, "meat_kg": None, "avg_weight_g": None,
-                            "deaths": 0}
-        summary["last_7d"].update(reports=0, reported=0, feed_kg=0, meat_kg=0, fcr=None, avg_weight_g=None, deaths=0)
-        await self.feed(message_update(OWNER_TG, "/reports"))
-        text = self.texts()
-        self.assertIn("Bugungi hisobot: ❌ topshirilmagan", text)
-        self.assertIn("Bugun go‘sht: —\n", text)
-        self.assertIn("Bugun yem: —\n", text)
-        self.assertIn("Bugun nobud: 0 dona", text)
-        self.assertIn("Go‘sht: 0 kg\n", text)
-        self.assertIn("FCR (yem/go‘sht): —\n", text)
-        self.assertNotIn("vazn", text)
-        self.assertIn("Yem: 0 kg", text)
-        self.assertIn("Hisobotlar: 0 / 7", text)
-        self.assertNotIn("None", text)
-
-    async def test_staff_null_ratios_and_large_numbers(self) -> None:
-        self.backend.summaries[ADMIN_TG]["today"].update(
-            households_active=0, households_expected=0, households_reported=0, report_discipline_pct=None,
-            fcr=None, meat_kg=1234567.5, feed_kg=12500.25, birds_total=1500,
-            birds_in_households=0, low_stock_count=0,
-        )
-        await self.feed(message_update(ADMIN_TG, "/reports"))
-        text = self.texts()
-        self.assertIn("Hisobot topshirgan xonadonlar: 0 / 0 (—)", text)
-        self.assertIn("Go‘sht: 1 234 567.5 kg", text)
-        self.assertIn("FCR (yem/go‘sht): —\n", text)
-        self.assertIn("Yem sarfi: 12 500.25 kg", text)
-        self.assertIn("  xonadonlarda: 0 · markazda: 1 500", text)
-        self.assertIn("Kam qolgan mahsulotlar: 0 ta", text)
-        self.assertNotIn("None", text)
-
-    async def test_owner_counts_only_expected_days(self) -> None:
-        """«Hisobotlar» = kutilgan kunlardan kiritilgani / kutilgan (raw ``reports`` emas): 7 / 3 emas, 3 / 3."""
-        self.backend.summaries[OWNER_TG]["last_7d"].update(reports=7, reported=3, expected=3)
-        await self.feed(message_update(OWNER_TG, "/reports"))
-        self.assertIn("Hisobotlar: 3 / 3", self.texts())
-
-    async def test_staff_old_backend_without_new_keys(self) -> None:
-        today = self.backend.summaries[ADMIN_TG]["today"]
-        del today["households_expected"], today["deaths_center"]
-        await self.feed(message_update(ADMIN_TG, "/reports"))
-        text = self.texts()
-        self.assertIn("Hisobot topshirgan xonadonlar: 8 / 11 (80.0%)", text)
-        self.assertIn("Nobud: 3 dona\n", text)
-        self.assertNotIn("markazda: 1\n", text)
-
-    async def test_percent_always_has_one_decimal(self) -> None:
-        self.backend.summaries[ADMIN_TG]["today"].update(report_discipline_pct=100, fcr=2.005)
-        await self.feed(message_update(ADMIN_TG, "/reports"))
-        text = self.texts()
-        self.assertIn("8 / 10 (100.0%)", text)
-        self.assertIn("FCR (yem/go‘sht): 2.01", text)  # FCR doim 2 xona kasr (half-up)
-
-    async def test_meat_fcr_and_weight_lines(self) -> None:
-        """Go'sht va FCR doim ko'rsatiladi (null -> «—»); o'rtacha vazn qatori faqat vazn kiritilgan bo'lsa."""
-        from handlers.users.reports import owner_report_text, staff_report_text
-
-        owner = {"household": {"name": "Uy", "code": "XN-0001"}, "date": "2026-11-05", "bird_count": 10,
-                 "today": {"report_submitted": True, "feed_kg": 5, "meat_kg": 62.5, "avg_weight_g": 2100.5,
-                           "deaths": 0},
-                 # FCR = 30 / 12 = 2.5 (backend hisoblaydi, bot faqat formatlaydi: 2 xona kasr).
-                 "last_7d": {"date_from": "2026-10-30", "date_to": "2026-11-05", "feed_kg": 30, "meat_kg": 12,
-                             "fcr": 2.5, "avg_weight_g": 2050, "deaths": 0, "reported": 7, "expected": 7}}
-        text = owner_report_text(owner)
-        self.assertIn("Bugun go‘sht: 62.5 kg\n", text)
-        self.assertIn("Bugun o‘rtacha vazn: 2 100.5 g\n", text)
-        self.assertIn("\nGo‘sht: 12 kg\n", text)
-        self.assertIn("FCR (yem/go‘sht): 2.50\n", text)
-        self.assertIn("\nO‘rtacha vazn: 2 050 g\n", text)
-        # Go'sht kiritilmagan: go'sht «—» (bugun) / 0 (hafta), FCR null -> «—», vazn qatorlari yo'q.
-        owner["today"].update(meat_kg=None, avg_weight_g=None)
-        owner["last_7d"].update(meat_kg=0, fcr=None, avg_weight_g=None)
-        text = owner_report_text(owner)
-        self.assertIn("Bugun go‘sht: —\n", text)
-        self.assertIn("\nGo‘sht: 0 kg\n", text)
-        self.assertIn("FCR (yem/go‘sht): —\n", text)
-        self.assertNotIn("vazn", text)
-        self.assertNotIn("None", text)
-        staff = staff_report_text({"date": "2026-11-05", "today": {"meat_kg": 7, "feed_kg": 14, "fcr": 2}})
-        self.assertIn("Go‘sht: 7 kg\n", staff)
-        self.assertIn("FCR (yem/go‘sht): 2.00\n", staff)
-        staff = staff_report_text({"date": "2026-11-05", "today": {"meat_kg": 0.0, "feed_kg": 14, "fcr": None}})
-        self.assertIn("Go‘sht: 0 kg\n", staff)
-        self.assertIn("FCR (yem/go‘sht): —\n", staff)
-
-    async def test_owner_report_escapes_household_values(self) -> None:
-        self.backend.summaries[OWNER_TG]["household"] = {"id": 3, "code": "XN-0003", "name": "<b>Uy</b> & bog‘"}
-        await self.feed(message_update(OWNER_TG, "/reports"))
-        text = self.texts()
-        self.assertIn("Xonadon: &lt;b&gt;Uy&lt;/b&gt; &amp; bog‘ (XN-0003)", text)
-        self.assertNotIn("<b>Uy</b>", text)
-
-    async def test_missing_date_falls_back_to_local_today(self) -> None:
-        del self.backend.summaries[ADMIN_TG]["date"]
-        with mock.patch("handlers.users.reports.local_today", return_value=date(2026, 1, 2)):
-            await self.feed(message_update(ADMIN_TG, "/reports"))
-        self.assertIn("Sana: 02.01.2026", self.texts())
-
-    async def test_no_webapp_button_without_https(self) -> None:
-        with mock.patch.object(config, "WEBAPP_ENABLED", False):
-            await self.feed(message_update(ADMIN_TG, "/reports"))
-        sent = self.sent()
-        self.assertEqual(len(sent), 1)
-        self.assertEqual(sent[0]["text"], STAFF_REPORT_TEXT)
-        self.assertIsNone(self.webapp_url(sent[0]))
-        self.assertNotIn("web_app", str(sent[0]["reply_markup"]))
-        self.assertIn("📊 Hisobot", str(sent[0]["reply_markup"]))  # rolga mos reply menyu
-
-    async def test_not_linked_user_is_sent_to_start(self) -> None:
-        await self.feed(message_update(NEW_TG, "/reports"))
-        self.assertIn("/start", self.texts())
-        self.assertEqual(self.summary_requests(), [])
-
-    async def test_blocked_user_does_not_request_summary(self) -> None:
-        self.backend.users[OWNER_TG]["is_active"] = False
-        await self.feed(message_update(OWNER_TG, "📊 Hisobot"))
-        self.assertIn("bloklangan", self.texts())
-        self.assertEqual(self.summary_requests(), [])
-
-    async def test_temp_password_user_is_sent_to_change_password(self) -> None:
-        self.backend.users[OWNER_TG]["must_change_password"] = True
-        await self.feed(message_update(OWNER_TG, "📊 Hisobot"))
-        self.assertIn("vaqtinchalik parol", self.texts())
-        self.assertEqual(self.summary_requests(), [])
-        # Profile and menu stay available (they show the same warning).
-        await self.feed(message_update(OWNER_TG, "/profile"))
-        self.assertIn("vaqtinchalik parolingizni almashtiring", self.texts())
-
-    async def test_summary_404_shows_not_linked_text(self) -> None:
-        self.backend.summary_error = (404, {"detail": "Foydalanuvchi topilmadi"})
-        await self.feed(message_update(OWNER_TG, "/reports"))
-        self.assertEqual(len(self.sent()), 1)
-        self.assertIn("Siz hali tizimga kirmagansiz", self.texts())
-        self.assertIn("/start", self.texts())
-
-    async def test_summary_403_shows_backend_detail_escaped(self) -> None:
-        detail = "Sizga xonadon biriktirilmagan. Administratorga murojaat qiling."
-        self.backend.summary_error = (403, {"detail": detail})
-        await self.feed(message_update(OWNER_TG, "/reports"))
-        self.assertEqual(len(self.sent()), 1)
-        self.assertEqual(self.texts(), f"⚠️ {detail}")
-
-        self.backend.summary_error = (403, {"detail": "<x> & y"})
-        await self.feed(message_update(OWNER_TG, "/reports"))
-        self.assertEqual(self.texts(), "⚠️ &lt;x&gt; &amp; y")
-
-    async def test_summary_unavailable_and_server_error(self) -> None:
-        self.backend.summary_error = (503, "Service Unavailable")
-        await self.feed(message_update(OWNER_TG, "/reports"))
-        self.assertEqual(len(self.sent()), 1)
-        self.assertEqual(self.texts(), "Server bilan aloqa yo‘q, birozdan keyin urinib ko‘ring.")
-
-        self.backend.summary_error = (500, "<h1>Server Error</h1>")
-        await self.feed(message_update(ADMIN_TG, "/reports"))
-        self.assertEqual(len(self.sent()), 1)
-        self.assertIn("Serverda xatolik", self.texts())
-
-    async def test_unexpected_summary_payload_is_server_error(self) -> None:
-        self.backend.summaries[ADMIN_TG] = ["not", "an", "object"]
-        await self.feed(message_update(ADMIN_TG, "/reports"))
-        self.assertEqual(len(self.sent()), 1)
-        self.assertIn("Serverda xatolik", self.texts())
-
-    async def test_backend_down_message(self) -> None:
-        await self.server.close()
-        await self.feed(message_update(OWNER_TG, "/reports"))
-        self.assertEqual(self.texts(), "Server bilan aloqa yo‘q, birozdan keyin urinib ko‘ring.")
-
-    async def test_reports_command_during_password_is_not_used_as_password(self) -> None:
-        await self.feed(message_update(NEW_TG, "/start"))
-        await self.feed(message_update(NEW_TG, "aliyev"))
-        with mock.patch.object(api, "link", wraps=api.link) as link:
-            await self.feed(message_update(NEW_TG, "/reports"))
-        link.assert_not_awaited()
-        self.assertIn("deleteMessage", [m for m, _ in self.calls])
-        self.assertIn("davom etmoqda", self.texts())
-        self.assertEqual(self.summary_requests(), [])
-
-    async def test_menu_has_reports_button_for_every_role(self) -> None:
-        for telegram_id in (OWNER_TG, ADMIN_TG, WAREHOUSE_TG):
-            with self.subTest(telegram_id=telegram_id):
-                await self.feed(message_update(telegram_id, "/menu"))
-                self.assertIn("📊 Hisobot", str(self.sent()[0]["reply_markup"]))
-
-    async def test_settings_command_points_to_web_app(self) -> None:
-        await self.feed(message_update(OWNER_TG, "/settings"))
-        self.assertIn("Bildirishnoma sozlamalari", self.texts())
-        await self.feed(message_update(OWNER_TG, "/help"))
-        self.assertIn("/settings — bildirishnoma sozlamalari", self.texts())
-
-    async def test_help_and_command_list_include_reports(self) -> None:
-        from utils.set_bot_commands import COMMANDS
-
-        self.assertIn("reports", [c.command for c in COMMANDS])
-        self.assertEqual(
-            next(c.description for c in COMMANDS if c.command == "reports"), "Hisobot va statistika"
-        )
-        await self.feed(message_update(OWNER_TG, "/help"))
-        self.assertIn("/reports — hisobot va statistika", self.texts())
+    def setUp(self) -> None:
+        self.api = fake_api()
+        patcher = mock.patch.object(handlers, "api", self.api)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.state = FSMContext(MemoryStorage(), chat=TG_ID, user=TG_ID)
+
+    def answers(self, message) -> list:
+        return [c.args[0] if c.args else c.kwargs.get("text") for c in message.answer.await_args_list]
+
+
+class StartAndLinkTests(HandlerTestCase):
+    async def test_start_linked_shows_menu(self) -> None:
+        message = make_message("/start")
+        await handlers.cmd_start(message, self.state)
+        self.assertIsNone(await self.state.get_state())
+        text = self.answers(message)[0]
+        self.assertIn("Ali Valiyev", text)
+        markup = message.answer.await_args.kwargs["reply_markup"]
+        self.assertIsInstance(markup, types.ReplyKeyboardMarkup)
+        labels = [b.text for row in markup.keyboard for b in row]
+        self.assertEqual(labels, [kb.BTN_TASKS, kb.BTN_PLATFORM, kb.BTN_PROFILE, kb.BTN_HELP, kb.BTN_LOGOUT])
+
+    async def test_start_unlinked_asks_login(self) -> None:
+        self.api.me.side_effect = NotFound(404, "topilmadi")
+        message = make_message("/start")
+        await handlers.cmd_start(message, self.state)
+        self.assertEqual(await self.state.get_state(), handlers.Login.username.state)
+        self.assertEqual(self.answers(message), [texts.ASK_LOGIN])
+
+    async def test_full_link_flow_deletes_password(self) -> None:
+        await self.state.set_state(handlers.Login.username)
+        await handlers.login_username(make_message("inspektor1"), self.state)
+        self.assertEqual(await self.state.get_state(), handlers.Login.password.state)
+
+        password_msg = make_message("s3cret pass")
+        await handlers.login_password(password_msg, self.state)
+
+        password_msg.delete.assert_awaited_once()
+        self.api.link.assert_awaited_once_with(TG_ID, "inspektor1", "s3cret pass")
+        self.assertIsNone(await self.state.get_state())
+        self.assertEqual(await self.state.get_data(), {})  # the login is not kept
+        reply = self.answers(password_msg)[0]
+        self.assertIn("Tizimga muvaffaqiyatli kirdingiz", reply)
+        self.assertNotIn("s3cret", reply)
+        self.assertIsInstance(password_msg.answer.await_args.kwargs["reply_markup"], types.ReplyKeyboardMarkup)
+
+    async def test_bad_credentials_ask_login_again(self) -> None:
+        self.api.link.side_effect = ApiError(400, "Login yoki parol noto‘g‘ri.")
+        await self.state.set_state(handlers.Login.password)
+        await self.state.update_data(username="inspektor1")
+        message = make_message("wrong")
+        await handlers.login_password(message, self.state)
+        message.delete.assert_awaited_once()
+        self.assertEqual(await self.state.get_state(), handlers.Login.username.state)
+        self.assertIn("Login yoki parol noto‘g‘ri", self.answers(message)[0])
+
+    async def test_backend_down_finishes_login(self) -> None:
+        self.api.link.side_effect = Unavailable()
+        await self.state.set_state(handlers.Login.password)
+        await self.state.update_data(username="inspektor1")
+        message = make_message("pw")
+        await handlers.login_password(message, self.state)
+        message.delete.assert_awaited_once()
+        self.assertIsNone(await self.state.get_state())
+        self.assertIn("/start", self.answers(message)[0])
+
+    async def test_invalid_username_stays(self) -> None:
+        await self.state.set_state(handlers.Login.username)
+        message = make_message("two words")
+        await handlers.login_username(message, self.state)
+        self.assertEqual(await self.state.get_state(), handlers.Login.username.state)
+
+    async def test_cancel_during_login(self) -> None:
+        self.api.me.side_effect = NotFound(404, "x")
+        await self.state.set_state(handlers.Login.password)
+        message = make_message("/cancel")
+        await handlers.cmd_cancel(message, self.state)
+        self.assertIsNone(await self.state.get_state())
+        self.assertIn("bekor qilindi", self.answers(message)[0])
+
+
+class MenuTests(HandlerTestCase):
+    async def test_tasks_empty(self) -> None:
+        message = make_message(kb.BTN_TASKS)
+        await handlers.menu_tasks(message)
+        self.api.tasks.assert_awaited_once_with(TG_ID)
+        self.assertEqual(self.answers(message), [texts.NO_TASKS])
+
+    async def test_tasks_list_has_webapp_buttons(self) -> None:
+        self.api.tasks.return_value = [
+            {"id": 5, "code": "XN-0005", "name": "Navbahor 12-uy", "stage_number": 4, "stage_title": "Qurilish",
+             "stage_status": "ACTIVE", "due_at": "2026-11-10T09:00:00+05:00", "is_overdue": True},
+            {"id": 6, "code": "XN-0006", "name": "Bog‘ 3",
+             "stage": {"number": 8, "title": "Veterinar ko‘rigi", "status": "SUBMITTED", "due_at": "2026-11-12"}},
+        ]
+        message = make_message(kb.BTN_TASKS)
+        await handlers.menu_tasks(message)
+        calls = message.answer.await_args_list
+        self.assertEqual(len(calls), 3)
+        self.assertIn("2 ta", calls[0].args[0])
+
+        first = calls[1].args[0]
+        self.assertIn("<b>XN-0005</b> — Navbahor 12-uy", first)
+        self.assertIn("Bosqich: 4. Qurilish", first)
+        self.assertIn("Muddat: 10.11.2026 09:00", first)
+        self.assertIn("muddati o‘tgan", first)
+        self.assertEqual(markup_urls(calls[1].kwargs["reply_markup"]), [f"{WEBAPP}/cases/5"])
+
+        second = calls[2].args[0]
+        self.assertIn("Bosqich: 8. Veterinar ko‘rigi", second)
+        self.assertIn("tasdiqlash kutilmoqda", second)
+        self.assertNotIn("muddati o‘tgan", second)
+        self.assertEqual(markup_urls(calls[2].kwargs["reply_markup"]), [f"{WEBAPP}/cases/6"])
+
+    async def test_tasks_are_capped(self) -> None:
+        self.api.tasks.return_value = [{"id": i, "code": f"XN-{i:04d}"} for i in range(1, texts.TASKS_LIMIT + 4)]
+        message = make_message(kb.BTN_TASKS)
+        await handlers.menu_tasks(message)
+        calls = message.answer.await_args_list
+        self.assertEqual(len(calls), texts.TASKS_LIMIT + 2)  # header + 20 cases + "yana 3 ta"
+        self.assertIn("yana 3 ta", calls[-1].args[0])
+        self.assertEqual(markup_urls(calls[-1].kwargs["reply_markup"]), [f"{WEBAPP}/tasks"])
+
+    async def test_tasks_unlinked(self) -> None:
+        self.api.tasks.side_effect = NotFound(404, "x")
+        message = make_message(kb.BTN_TASKS)
+        await handlers.menu_tasks(message)
+        self.assertEqual(self.answers(message), [texts.NOT_LINKED])
+
+    async def test_platform_button(self) -> None:
+        message = make_message(kb.BTN_PLATFORM)
+        await handlers.menu_platform(message)
+        self.assertEqual(markup_urls(message.answer.await_args.kwargs["reply_markup"]), [f"{WEBAPP}/"])
+
+    async def test_profile(self) -> None:
+        message = make_message(kb.BTN_PROFILE)
+        await handlers.menu_profile(message)
+        self.api.me.assert_awaited_once_with(TG_ID)
+        text = self.answers(message)[0]
+        for part in ("Ali Valiyev", "<code>inspektor1</code>", "Rol: Inspektor", "+998901234567"):
+            self.assertIn(part, text)
+
+    async def test_profile_unlinked(self) -> None:
+        self.api.me.side_effect = NotFound(404, "x")
+        message = make_message(kb.BTN_PROFILE)
+        await handlers.menu_profile(message)
+        self.assertEqual(self.answers(message), [texts.NOT_LINKED])
+
+    async def test_help(self) -> None:
+        message = make_message(kb.BTN_HELP)
+        await handlers.cmd_help(message)
+        self.assertEqual(self.answers(message), [texts.HELP])
+
+    async def test_logout_confirm_and_yes(self) -> None:
+        message = make_message(kb.BTN_LOGOUT)
+        await handlers.menu_logout(message)
+        markup = message.answer.await_args.kwargs["reply_markup"]
+        self.assertEqual([b.callback_data for b in markup.inline_keyboard[0]], [kb.LOGOUT_YES, kb.LOGOUT_NO])
+        self.api.unlink.assert_not_awaited()
+
+        call = mock.MagicMock(data=kb.LOGOUT_YES, from_user=mock.MagicMock(id=TG_ID))
+        call.answer = mock.AsyncMock()
+        call.message = make_message()
+        call.message.edit_text = mock.AsyncMock()
+        await handlers.logout_answer(call)
+        self.api.unlink.assert_awaited_once_with(TG_ID)
+        self.assertEqual(self.answers(call.message), [texts.LOGOUT_DONE])
+
+    async def test_logout_no(self) -> None:
+        call = mock.MagicMock(data=kb.LOGOUT_NO, from_user=mock.MagicMock(id=TG_ID))
+        call.answer = mock.AsyncMock()
+        call.message = make_message()
+        call.message.edit_text = mock.AsyncMock()
+        await handlers.logout_answer(call)
+        self.api.unlink.assert_not_awaited()
+        call.message.edit_text.assert_awaited_once_with(texts.LOGOUT_CANCELLED)
+
+
+class NoHttpsWebAppTests(HandlerTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        patcher = mock.patch.object(config, "WEBAPP_URL", "http://localhost:3000")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def test_no_buttons_anywhere(self) -> None:
+        self.assertIsNone(kb.webapp_button("x", "/cases/1"))
+
+        self.api.tasks.return_value = [{"id": 5, "code": "XN-0005"}]
+        message = make_message(kb.BTN_TASKS)
+        await handlers.menu_tasks(message)
+        self.assertIn(texts.WEBAPP_OFF, message.answer.await_args_list[0].args[0])
+        self.assertIsNone(message.answer.await_args_list[1].kwargs["reply_markup"])
+
+        message = make_message(kb.BTN_PLATFORM)
+        await handlers.menu_platform(message)
+        self.assertEqual(self.answers(message), [texts.WEBAPP_OFF])
+
+
+class DispatcherRoutingTests(HandlerTestCase):
+    """Goes through the real Dispatcher: filters, registration order, private-only."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.send = mock.AsyncMock()
+        patcher = mock.patch.object(loader.bot, "send_message", self.send)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        Bot.set_current(loader.bot)
+
+    def update(self, text: str, chat_type: str = "private") -> types.Update:
+        chat_id = TG_ID if chat_type == "private" else -100123
+        message = {
+            "message_id": 1, "date": 1700000000, "text": text,
+            "chat": {"id": chat_id, "type": chat_type},
+            "from": {"id": TG_ID, "is_bot": False, "first_name": "Ali"},
+        }
+        if text.startswith("/"):
+            message["entities"] = [{"type": "bot_command", "offset": 0, "length": len(text.split()[0])}]
+        return types.Update.to_object({"update_id": 1, "message": message})
+
+    async def test_private_help_and_menu_button(self) -> None:
+        await loader.dp.process_update(self.update("/help"))
+        self.assertEqual(self.send.await_args.kwargs.get("text") or self.send.await_args.args[1], texts.HELP)
+        await loader.dp.process_update(self.update(kb.BTN_PROFILE))
+        self.api.me.assert_awaited_with(TG_ID)
+
+    async def test_group_chat_is_ignored(self) -> None:
+        await loader.dp.process_update(self.update("/start", chat_type="group"))
+        await loader.dp.process_update(self.update(kb.BTN_TASKS, chat_type="supergroup"))
+        self.send.assert_not_awaited()
+        self.api.me.assert_not_awaited()
+        self.api.tasks.assert_not_awaited()
+
+    async def test_backend_error_is_reported_to_user(self) -> None:
+        self.api.me.side_effect = Unavailable()
+        await loader.dp.process_update(self.update(kb.BTN_PROFILE))
+        sent = self.send.await_args.kwargs.get("text") or self.send.await_args.args[1]
+        self.assertIn("Server bilan aloqa yo‘q", sent)
 
 
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    unittest.main()

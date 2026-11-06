@@ -1,30 +1,51 @@
+"""NNP bot entry point: long polling + the notification loop.
+
+Never run this locally with the production BOT_TOKEN: it would take the server bot's updates.
+"""
 import logging
 
-from aiogram import Dispatcher, executor
+from aiogram import Dispatcher, executor, types
+from aiogram.utils.exceptions import TelegramAPIError
 
-from data import config
+import config
+import handlers  # noqa: F401  (registers the handlers)
 from loader import api, bot, dp
-import middlewares, filters, handlers  # noqa: F401,E401 — handlerlarni ro'yxatdan o'tkazish
-from utils.notifier import NotificationWorker
-from utils.notify_admins import on_startup_notify
-from utils.set_bot_commands import set_default_commands, set_menu_button
+from notifier import Notifier
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger(__name__)
 
-notifier = NotificationWorker(bot=bot, api=api, webapp_url=config.WEBAPP_URL)
+COMMANDS = [
+    types.BotCommand("start", "Tizimga kirish"),
+    types.BotCommand("menu", "Asosiy menyu"),
+    types.BotCommand("help", "Yordam"),
+    types.BotCommand("cancel", "Amalni bekor qilish"),
+]
+
+notifier = Notifier(bot, api)
 
 
 async def on_startup(dispatcher: Dispatcher) -> None:
-    if config.WEBAPP_URL and not config.WEBAPP_ENABLED:
-        log.warning("WEBAPP_URL https bilan boshlanmaydi — Web App tugmalari o‘chirildi: %s", config.WEBAPP_URL)
-    await set_default_commands(dispatcher.bot)
-    await set_menu_button(dispatcher.bot, config.WEBAPP_URL)
-    await on_startup_notify(dispatcher.bot, config.ADMINS)
+    if not config.webapp_enabled():
+        log.warning("WEBAPP_URL is not https: Web App buttons are disabled")
+    try:
+        await dispatcher.bot.set_my_commands(COMMANDS)
+        if config.webapp_enabled():
+            button = types.MenuButtonWebApp(text="Platforma", web_app=types.WebAppInfo(url=config.WEBAPP_URL))
+        else:
+            button = types.MenuButtonCommands()
+        await dispatcher.bot.set_chat_menu_button(menu_button=button)
+    except TelegramAPIError as exc:
+        log.warning("Could not set commands / menu button: %s", exc)
+    for admin_id in config.ADMINS:
+        try:
+            await dispatcher.bot.send_message(admin_id, "✅ NNP boti ishga tushdi.")
+        except TelegramAPIError as exc:
+            log.warning("Startup message to admin %s failed: %s", admin_id, exc)
     notifier.start()
 
 
 async def on_shutdown(dispatcher: Dispatcher) -> None:
-    # Telegram sessiyasi va FSM xotirasini executor o'zi yopadi (Executor._shutdown).
     await notifier.stop()
     await api.close()
 
